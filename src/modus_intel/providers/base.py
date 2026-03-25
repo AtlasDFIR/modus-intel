@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import ClassVar, Optional
 
 import httpx
 
@@ -9,7 +9,14 @@ from modus_intel.core.models import ProviderResult
 
 
 class BaseProvider(ABC):
-    name: str
+    registry: ClassVar[list[type["BaseProvider"]]] = []
+    name: str = ""
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+
+        if not getattr(cls, "__abstractmethods__", None) and cls.name:
+            BaseProvider.registry.append(cls)
 
     @abstractmethod
     def supports(self, indicator_type: str) -> bool:
