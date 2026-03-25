@@ -9,7 +9,7 @@ from modus_intel.core.models import IndicatorType
 
 _HASH_RE = re.compile(r"^[a-fA-F0-9]+$")
 
-# Practical domain regex: good enough for OSINT tooling without being overly strict.
+# Practical domain regex
 _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
     r"(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$"
@@ -33,8 +33,13 @@ def detect_ioc_type(value: str) -> IndicatorType:
 
     # Hash
     hv = v.lower()
-    if _HASH_RE.match(hv) and len(hv) in (32, 40, 64):
-        return "hash"
+    if _HASH_RE.match(hv):
+        if len(hv) == 32:
+            return "md5"
+        if len(hv) == 40:
+            return "sha1"
+        if len(hv) == 64:
+            return "sha256"
 
     # Domain
     dv = v.lower().strip(".")
@@ -47,7 +52,7 @@ def detect_ioc_type(value: str) -> IndicatorType:
 def normalize_ioc(value: str, ioc_type: IndicatorType) -> str:
     v = value.strip().strip('"').strip("'")
 
-    if ioc_type in ("domain", "hash"):
+    if ioc_type in ("domain", "hash", "md5", "sha1", "sha256"):
         return v.lower().strip(".")
     if ioc_type == "url":
         return v.strip()

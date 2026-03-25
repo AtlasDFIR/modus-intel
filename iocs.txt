@@ -1,0 +1,7 @@
+# Test IOC list for MODUS-Intel
+
+45.155.205.233
+8.8.8.8
+example.com
+https://example.com
+d41d8cd98f00b204e9800998ecf8427e
