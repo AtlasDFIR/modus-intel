@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from modus_intel.core.models import ScanResult
 
+
 def _hr(char: str = "─", width: int = 58) -> str:
     return char * width
 
@@ -18,7 +19,7 @@ def _color_verdict(verdict: str) -> str:
         return _color(v, "33")  # yellow
     if v == "BENIGN":
         return _color(v, "32")  # green
-    return _color(v, "36")      # cyan
+    return _color(v, "36")  # cyan
 
 
 def _color_severity(severity: str) -> str:
@@ -31,7 +32,22 @@ def _color_severity(severity: str) -> str:
         return _color(s, "33")  # yellow
     if s == "LOW":
         return _color(s, "32")  # green
-    return _color(s, "36")      # cyan
+    return _color(s, "36")  # cyan
+
+
+def _provider_line(pr) -> str:
+    if pr.status == "error":
+        detail = pr.evidence[0] if pr.evidence else "lookup failed"
+        return f"  {pr.provider:<12} {_color('ERROR', '31')}  {detail}"
+
+    labels = ", ".join(pr.labels) if pr.labels else "-"
+    line = (
+        f"  {pr.provider:<12} score={(pr.score if pr.score is not None else 0):<3} "
+        f"confidence={(pr.confidence or '-'): <6} labels={labels}"
+    )
+    if pr.status == "no_data":
+        line += "  (no data)"
+    return line
 
 
 def render_pretty(result: ScanResult, include_explain: bool = False) -> str:
@@ -52,10 +68,7 @@ def render_pretty(result: ScanResult, include_explain: bool = False) -> str:
         lines.append("PROVIDERS")
         lines.append(hr("·"))
         for pr in sorted(result.provider_results, key=lambda x: x.provider):
-            labels = ", ".join(pr.labels) if pr.labels else "-"
-            lines.append(
-                f"  {pr.provider:<12} score={(pr.score if pr.score is not None else 0):<3} confidence={(pr.confidence or '-'): <6} labels={labels}"
-            )
+            lines.append(_provider_line(pr))
         lines.append("")
 
         evidence_lines = []
@@ -85,14 +98,24 @@ def render_pretty(result: ScanResult, include_explain: bool = False) -> str:
     if include_explain and result.explanation:
         lines.append("EXPLANATION")
         lines.append(hr("·"))
-        lines.append(f"  providers_considered={result.explanation.get('providers_considered')}")
-        lines.append(f"  override_triggered={result.explanation.get('override_triggered')}")
+        lines.append(
+            f"  providers_considered={result.explanation.get('providers_considered')}"
+        )
+        lines.append(
+            f"  override_triggered={result.explanation.get('override_triggered')}"
+        )
         if result.explanation.get("override_reason"):
-            lines.append(f"  override_reason={result.explanation.get('override_reason')}")
+            lines.append(
+                f"  override_reason={result.explanation.get('override_reason')}"
+            )
         lines.append(f"  max_provider={result.explanation.get('max_provider') or '-'}")
-        lines.append(f"      max_score={result.explanation.get('max_score') if result.explanation.get('max_score') is not None else '-'}")
+        lines.append(
+            f"      max_score={result.explanation.get('max_score') if result.explanation.get('max_score') is not None else '-'}"
+        )
         if "weighted_avg_score" in result.explanation:
-            lines.append(f"  weighted_avg_score={result.explanation.get('weighted_avg_score')}")
+            lines.append(
+                f"  weighted_avg_score={result.explanation.get('weighted_avg_score')}"
+            )
         lines.append("")
 
     lines.append(hr())
@@ -143,15 +166,16 @@ def render_batch_pretty(
         if result.provider_results:
             lines.append("    providers:")
             for pr in sorted(result.provider_results, key=lambda x: x.provider):
-                labels = ", ".join(pr.labels) if pr.labels else "-"
-                lines.append(
-                    f"      {pr.provider:<12} score={(pr.score if pr.score is not None else 0):<3} confidence={(pr.confidence or '-'): <6} labels={labels}"
-                )
+                lines.append("    " + _provider_line(pr))
 
         if include_explain and result.explanation:
             lines.append("    explanation:")
-            lines.append(f"      max_provider={result.explanation.get('max_provider') or '-'}")
-            lines.append(f"      max_score={result.explanation.get('max_score') if result.explanation.get('max_score') is not None else '-'}")
+            lines.append(
+                f"      max_provider={result.explanation.get('max_provider') or '-'}"
+            )
+            lines.append(
+                f"      max_score={result.explanation.get('max_score') if result.explanation.get('max_score') is not None else '-'}"
+            )
             if "weighted_avg_score" in result.explanation:
                 lines.append(
                     f"      weighted_avg_score={result.explanation.get('weighted_avg_score')}"

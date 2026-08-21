@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Optional
 
@@ -43,17 +44,15 @@ class Cache:
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
+        with closing(self._connect()) as conn:
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS cache (
                     cache_key TEXT PRIMARY KEY,
                     value_json TEXT NOT NULL,
                     created_at INTEGER NOT NULL,
                     expires_at INTEGER NOT NULL
                 )
-                """
-            )
+                """)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_expires_at ON cache(expires_at)"
             )
@@ -66,7 +65,7 @@ class Cache:
     def get(self, cache_key: str) -> Optional[dict[str, Any]]:
         now = int(time.time())
 
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             row = conn.execute(
                 "SELECT value_json, expires_at FROM cache WHERE cache_key = ?",
                 (cache_key,),
@@ -93,7 +92,7 @@ class Cache:
         expires_at = now + ttl_seconds
         value_json = json.dumps(value, separators=(",", ":"))
 
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             conn.execute(
                 """
                 INSERT INTO cache (cache_key, value_json, created_at, expires_at)
@@ -108,9 +107,11 @@ class Cache:
             conn.commit()
 
     def purge_expired(self) -> int:
+        """Delete every expired row. Called by the CLI on startup so the
+        database does not grow without bound."""
         now = int(time.time())
 
-        with self._connect() as conn:
+        with closing(self._connect()) as conn:
             cur = conn.execute(
                 "DELETE FROM cache WHERE expires_at <= ?",
                 (now,),

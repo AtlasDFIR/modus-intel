@@ -3,19 +3,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import sys
 from typing import Optional
 
 import httpx
 import typer
+from dotenv import load_dotenv
 
+import modus_intel.providers  # noqa: F401  (import populates the provider registry)
 from modus_intel.core.cache import Cache
-from modus_intel.core.detect import detect_ioc_type, normalize_ioc
+from modus_intel.core.detect import prepare_ioc
 from modus_intel.core.models import Indicator, ProviderResult, ScanResult
 from modus_intel.core.render import render_batch_pretty, render_pretty
 from modus_intel.core.verdict import compute_verdict
-from modus_intel.providers.abuseipdb import AbuseIPDBProvider
-from modus_intel.providers.urlhaus import URLHausProvider
-from modus_intel.providers.virustotal import VirusTotalProvider
+from modus_intel.providers.base import BaseProvider
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 
@@ -23,7 +25,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 BANNER = r"""> BOOT SEQUENCE INITIALIZED
 > LOADING COGNITIVE SUBROUTINES...
 > THREAT INTELLIGENCE MODULE: ACTIVE
-> PROVIDER MATRIX: VIRUSTOTAL | ABUSEIPDB | OTX | URLHAUS
+> PROVIDER MATRIX: VIRUSTOTAL | ABUSEIPDB | URLHAUS
 > OPERATOR: ATLASDFIR
 
       ███╗   ███╗ ██████╗ ██████╗ ██╗   ██╗███████╗
@@ -37,7 +39,7 @@ BANNER = r"""> BOOT SEQUENCE INITIALIZED
            AtlasDFIR | Threat Intelligence Systems
 
 ------------------------------------------------------------
-  Autonomous Threat Intelligence & IOC Enrichment Engine
+       Threat Intelligence & IOC Enrichment Engine
 ------------------------------------------------------------
 
   > Scan
@@ -46,11 +48,14 @@ BANNER = r"""> BOOT SEQUENCE INITIALIZED
   > Assess
 """
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
 
 def configure_logging(debug: bool, quiet: bool) -> None:
     logging.basicConfig(
         level=logging.DEBUG if debug else logging.WARNING,
         format="[%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stderr,
     )
 
     logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -61,12 +66,40 @@ def configure_logging(debug: bool, quiet: bool) -> None:
         logging.getLogger().setLevel(logging.ERROR)
 
 
-def get_providers():
-    return [
-        AbuseIPDBProvider(),
-        VirusTotalProvider(),
-        URLHausProvider(),
-    ]
+def get_providers() -> list[BaseProvider]:
+    """Instantiate every provider registered on BaseProvider.
+
+    Registration happens automatically in BaseProvider.__init_subclass__
+    when the provider modules are imported (see providers/__init__.py).
+    """
+    return [cls() for cls in BaseProvider.registry]
+
+
+def warn_unconfigured_providers(providers: list[BaseProvider], quiet: bool) -> None:
+    """Tell the user which providers will be skipped and why.
+
+    Without this, a run with no API keys silently returns 'unknown' for
+    everything, which looks identical to a clean result.
+    """
+    missing = [p for p in providers if not p.is_configured()]
+
+    if not missing:
+        return
+
+    if len(missing) == len(providers):
+        typer.echo(
+            "[!] No provider API keys configured. Every lookup will be skipped "
+            "and all verdicts will be 'unknown'.",
+            err=True,
+        )
+    elif quiet:
+        return
+
+    for p in missing:
+        typer.echo(
+            f"[!] {p.name}: skipped (set {p.env_var} to enable; see .env.example)",
+            err=True,
+        )
 
 
 def hours_to_ttl_seconds(hours: int) -> int:
@@ -82,21 +115,24 @@ def normalize_output_format(output_format: str) -> str:
 
 def emit_output(text: str, out: Optional[str]) -> None:
     if out:
+        # Never write ANSI color codes into files.
         with open(out, "w", encoding="utf-8") as f:
-            f.write(text + "\n")
-        typer.echo(f"\n[+] Wrote results to: {out}")
+            f.write(_ANSI_RE.sub("", text) + "\n")
+        typer.echo(f"\n[+] Wrote results to: {out}", err=True)
     else:
+        if not sys.stdout.isatty():
+            text = _ANSI_RE.sub("", text)
         typer.echo(text)
 
 
 @app.callback()
 def main() -> None:
     """MODUS-INTEL CLI."""
-    return
+    load_dotenv()
 
 
 async def enrich_providers_async(
-    providers,
+    providers: list[BaseProvider],
     ioc_type: str,
     normalized: str,
     cache: Cache,
@@ -106,7 +142,7 @@ async def enrich_providers_async(
 ) -> list[ProviderResult]:
     async with httpx.AsyncClient(timeout=15.0) as client:
 
-        async def enrich_one(provider) -> Optional[ProviderResult]:
+        async def enrich_one(provider: BaseProvider) -> Optional[ProviderResult]:
             if not provider.supports(ioc_type):
                 return None
 
@@ -119,7 +155,8 @@ async def enrich_providers_async(
 
             pr = await provider.lookup_async(normalized, ioc_type, client)
 
-            if pr is not None and not no_cache:
+            # Failed lookups are never cached; the next run should retry.
+            if pr is not None and pr.status != "error" and not no_cache:
                 cache.set(
                     cache_key,
                     pr.model_dump(mode="json", exclude_none=True),
@@ -135,15 +172,23 @@ async def enrich_providers_async(
 
 async def scan_one_ioc_async(
     indicator_raw: str,
-    providers,
+    providers: list[BaseProvider],
     cache: Cache,
     ttl_seconds: int,
     no_cache: bool,
     refresh: bool,
 ) -> ScanResult:
-    raw = indicator_raw.strip()
-    ioc_type = detect_ioc_type(raw)
-    normalized = normalize_ioc(raw, ioc_type)
+    normalized, ioc_type = prepare_ioc(indicator_raw)
+
+    if ioc_type == "unknown":
+        return ScanResult(
+            indicator=Indicator(value=normalized, type=ioc_type),
+            provider_results=[],
+            verdict="unknown",
+            reason="unrecognized indicator format (expected IP, domain, URL, or md5/sha1/sha256 hash)",
+            severity="informational",
+            explanation=None,
+        )
 
     provider_results = await enrich_providers_async(
         providers=providers,
@@ -169,7 +214,7 @@ async def scan_one_ioc_async(
 
 async def run_batch_with_progress(
     iocs: list[str],
-    providers,
+    providers: list[BaseProvider],
     cache: Cache,
     ttl_seconds: int,
     no_cache: bool,
@@ -182,14 +227,16 @@ async def run_batch_with_progress(
     ordered_results: list[ScanResult | None] = [None] * total
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
+    show_progress = not quiet and sys.stderr.isatty()
+
     def render_progress() -> None:
-        if quiet:
+        if not show_progress:
             return
 
         width = 24
         filled = int(width * completed / total) if total else width
         bar = "█" * filled + "░" * (width - filled)
-        typer.echo(f"\r[{bar}] {completed}/{total} completed", nl=False)
+        typer.echo(f"\r[{bar}] {completed}/{total} completed", nl=False, err=True)
 
     async def scan_indexed(idx: int, ioc: str) -> tuple[int, ScanResult]:
         async with semaphore:
@@ -204,8 +251,7 @@ async def run_batch_with_progress(
             return idx, result
 
     tasks = [
-        asyncio.create_task(scan_indexed(idx, ioc))
-        for idx, ioc in enumerate(iocs)
+        asyncio.create_task(scan_indexed(idx, ioc)) for idx, ioc in enumerate(iocs)
     ]
 
     render_progress()
@@ -216,8 +262,8 @@ async def run_batch_with_progress(
         completed += 1
         render_progress()
 
-    if not quiet:
-        typer.echo("")
+    if show_progress:
+        typer.echo("", err=True)
 
     return [result for result in ordered_results if result is not None]
 
@@ -246,6 +292,7 @@ def build_batch_summary(results: list[ScanResult]) -> dict:
         "verdict_counts": {},
         "severity_counts": {},
         "provider_hits": {},
+        "provider_errors": {},
     }
 
     for result in results:
@@ -261,32 +308,61 @@ def build_batch_summary(results: list[ScanResult]) -> dict:
             summary["provider_hits"][provider_result.provider] = (
                 summary["provider_hits"].get(provider_result.provider, 0) + 1
             )
+            if provider_result.status == "error":
+                summary["provider_errors"][provider_result.provider] = (
+                    summary["provider_errors"].get(provider_result.provider, 0) + 1
+                )
 
     return summary
 
 
+def _setup_run(
+    quiet: bool, cache_ttl_hours: int
+) -> tuple[Cache, int, list[BaseProvider]]:
+    """Shared startup for scan and batch: banner, cache housekeeping,
+    provider construction, and missing-key warnings."""
+    if not quiet:
+        typer.echo(BANNER, err=True)
+
+    cache = Cache()
+    cache.purge_expired()
+
+    providers = get_providers()
+    warn_unconfigured_providers(providers, quiet=quiet)
+
+    return cache, hours_to_ttl_seconds(cache_ttl_hours), providers
+
+
 @app.command()
 def scan(
-    indicator: str = typer.Argument(..., help="IP, domain, URL, or hash (md5/sha1/sha256)."),
+    indicator: str = typer.Argument(
+        ...,
+        help="IP, domain, URL, or hash (md5/sha1/sha256). Defanged forms (hxxp, [.]) are accepted.",
+    ),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging."),
-    out: Optional[str] = typer.Option(None, "--out", "-o", help="Write output to a file (respects --format)."),
+    out: Optional[str] = typer.Option(
+        None, "--out", "-o", help="Write output to a file (respects --format)."
+    ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress banner output."),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes."),
-    refresh: bool = typer.Option(False, "--refresh", help="Ignore cache and fetch fresh results."),
+    no_cache: bool = typer.Option(
+        False, "--no-cache", help="Disable cache reads/writes."
+    ),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Ignore cache and fetch fresh results."
+    ),
     cache_ttl_hours: int = typer.Option(24, "--cache-ttl", help="Cache TTL in hours."),
-    explain: bool = typer.Option(False, "--explain", help="Include explainability details in output."),
-    format: str = typer.Option("json", "--format", help="Output format: json or pretty"),
+    explain: bool = typer.Option(
+        False, "--explain", help="Include explainability details in output."
+    ),
+    format: str = typer.Option(
+        "json", "--format", help="Output format: json or pretty"
+    ),
 ) -> None:
     """Scan a single IOC, enrich it with provider data, and emit a verdict."""
     configure_logging(debug=debug, quiet=quiet)
 
-    if not quiet:
-        typer.echo(BANNER)
-
     output_format = normalize_output_format(format)
-    cache = Cache()
-    ttl_seconds = hours_to_ttl_seconds(cache_ttl_hours)
-    providers = get_providers()
+    cache, ttl_seconds, providers = _setup_run(quiet, cache_ttl_hours)
 
     result = asyncio.run(
         scan_one_ioc_async(
@@ -298,6 +374,10 @@ def scan(
             refresh=refresh,
         )
     )
+
+    if result.indicator.type == "unknown":
+        typer.echo(f"[!] {result.reason}: {result.indicator.value!r}", err=True)
+        raise typer.Exit(code=2)
 
     if not explain:
         result.explanation = None
@@ -313,28 +393,42 @@ def scan(
 
 @app.command()
 def batch(
-    input_file: str = typer.Argument(..., help="Path to a text file containing one IOC per line."),
+    input_file: str = typer.Argument(
+        ..., help="Path to a text file containing one IOC per line."
+    ),
     debug: bool = typer.Option(False, "--debug", help="Enable debug logging."),
-    out: Optional[str] = typer.Option(None, "--out", "-o", help="Write output to a file (respects --format)."),
+    out: Optional[str] = typer.Option(
+        None, "--out", "-o", help="Write output to a file (respects --format)."
+    ),
     quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress banner output."),
-    no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache reads/writes."),
-    refresh: bool = typer.Option(False, "--refresh", help="Ignore cache and fetch fresh results."),
+    no_cache: bool = typer.Option(
+        False, "--no-cache", help="Disable cache reads/writes."
+    ),
+    refresh: bool = typer.Option(
+        False, "--refresh", help="Ignore cache and fetch fresh results."
+    ),
     cache_ttl_hours: int = typer.Option(24, "--cache-ttl", help="Cache TTL in hours."),
-    explain: bool = typer.Option(False, "--explain", help="Include explainability details in output."),
-    format: str = typer.Option("json", "--format", help="Output format: json or pretty"),
-    concurrency: int = typer.Option(5, "--concurrency", help="Maximum number of concurrent IOC scans."),
+    explain: bool = typer.Option(
+        False, "--explain", help="Include explainability details in output."
+    ),
+    format: str = typer.Option(
+        "json", "--format", help="Output format: json or pretty"
+    ),
+    concurrency: int = typer.Option(
+        5, "--concurrency", help="Maximum number of concurrent IOC scans."
+    ),
 ) -> None:
     """Scan multiple IOCs from a file and emit batch results with summary."""
     configure_logging(debug=debug, quiet=quiet)
 
-    if not quiet:
-        typer.echo(BANNER)
-
     output_format = normalize_output_format(format)
     iocs = load_iocs_from_file(input_file)
-    cache = Cache()
-    ttl_seconds = hours_to_ttl_seconds(cache_ttl_hours)
-    providers = get_providers()
+
+    if not iocs:
+        typer.echo(f"[!] No IOCs found in {input_file}", err=True)
+        raise typer.Exit(code=2)
+
+    cache, ttl_seconds, providers = _setup_run(quiet, cache_ttl_hours)
 
     results = asyncio.run(
         run_batch_with_progress(
@@ -360,7 +454,9 @@ def batch(
     else:
         payload = {
             "summary": summary,
-            "results": [result.model_dump(mode="json", exclude_none=True) for result in results],
+            "results": [
+                result.model_dump(mode="json", exclude_none=True) for result in results
+            ],
         }
         text = json.dumps(payload, indent=2)
 
