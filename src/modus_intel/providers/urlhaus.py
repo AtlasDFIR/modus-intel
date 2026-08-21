@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import os
 import logging
-from typing import Optional
+import os
+from typing import ClassVar, Optional
 
 import httpx
 
@@ -14,10 +14,11 @@ log = logging.getLogger(__name__)
 
 class URLHausProvider(BaseProvider):
     name = "urlhaus"
+    env_var: ClassVar[str] = "URLHAUS_AUTH_KEY"
     api_url = "https://urlhaus-api.abuse.ch/v1/url/"
 
     def __init__(self) -> None:
-        self.api_key = os.getenv("URLHAUS_AUTH_KEY")
+        self.api_key = os.getenv(self.env_var)
 
     def supports(self, indicator_type: str) -> bool:
         # This endpoint is for URL lookups, not raw domain lookups.
@@ -49,23 +50,46 @@ class URLHausProvider(BaseProvider):
             response.raise_for_status()
         except httpx.HTTPError as exc:
             log.warning("URLHausProvider request failed for %s: %s", indicator, exc)
-            return None
+            return ProviderResult(
+                provider=self.name,
+                status="error",
+                evidence=[f"request failed: {exc.__class__.__name__}"],
+            )
 
         try:
             data = response.json()
         except ValueError:
             log.warning("URLHausProvider returned invalid JSON for %s", indicator)
-            return None
-
-        query_status = data.get("query_status")
-        if query_status != "ok":
             return ProviderResult(
                 provider=self.name,
+                status="error",
+                evidence=["invalid JSON response"],
+            )
+
+        query_status = data.get("query_status")
+
+        # "no_results" is a meaningful answer: URLHaus has never seen this URL.
+        if query_status == "no_results":
+            return ProviderResult(
+                provider=self.name,
+                status="no_data",
                 score=0,
                 confidence="low",
-                labels=[],
+                evidence=["URL not found in URLHaus"],
+            )
+
+        # Anything else that is not "ok" (invalid_url, auth errors, ...) is a
+        # failed lookup, not evidence about the indicator.
+        if query_status != "ok":
+            log.warning(
+                "URLHausProvider lookup failed for %s: query_status=%s",
+                indicator,
+                query_status,
+            )
+            return ProviderResult(
+                provider=self.name,
+                status="error",
                 evidence=[f"query_status={query_status}"],
-                links=[],
             )
 
         score = 0
@@ -113,6 +137,7 @@ class URLHausProvider(BaseProvider):
 
         return ProviderResult(
             provider=self.name,
+            status="ok",
             score=score,
             confidence=confidence,
             labels=labels,
