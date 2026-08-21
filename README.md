@@ -4,6 +4,8 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/github/license/AtlasDFIR/modus-intel)
 
+![MODUS-Intel terminal demo](docs/demo.gif)
+
 A threat intelligence CLI (Command Line Interface) that enriches IOCs (Indicators of Compromise) against multiple OSINT (Open Source Intelligence) providers and produces a single weighted verdict with an auditable explanation of how it was reached.
 
 Feed it an IP, domain, URL, or file hash. MODUS-Intel classifies it, fans out async lookups to VirusTotal, AbuseIPDB, URLHaus, and GreyNoise, scores the responses, and tells you whether the indicator is benign, suspicious, or malicious, and why.
