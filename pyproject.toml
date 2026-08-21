@@ -1,7 +1,7 @@
 [project]
 name = "modus-intel"
 version = "0.1.0"
-description = "Autonomous Threat Intelligence & IOC Enrichment Engine"
+description = "Threat intelligence IOC enrichment CLI: scan indicators against VirusTotal, AbuseIPDB, and URLHaus and get a weighted verdict"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "AtlasDFIR" }]
@@ -19,6 +19,8 @@ modus-intel = "modus_intel.cli:app"
 dev = [
   "black>=24.0",
   "ruff>=0.5.0",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
 ]
 
 [build-system]
@@ -41,3 +43,10 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
+# Formatting (including line length) is owned by black; long help strings
+# and banner art are allowed to exceed 88 columns.
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
