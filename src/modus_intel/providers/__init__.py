@@ -3,7 +3,13 @@
 # from that registry, so a new provider only needs a subclass and an import
 # here to be picked up.
 from .abuseipdb import AbuseIPDBProvider
+from .greynoise import GreyNoiseProvider
 from .urlhaus import URLHausProvider
 from .virustotal import VirusTotalProvider
 
-__all__ = ["AbuseIPDBProvider", "URLHausProvider", "VirusTotalProvider"]
+__all__ = [
+    "AbuseIPDBProvider",
+    "GreyNoiseProvider",
+    "URLHausProvider",
+    "VirusTotalProvider",
+]

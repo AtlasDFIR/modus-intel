@@ -6,7 +6,7 @@
 
 A threat intelligence CLI (Command Line Interface) that enriches IOCs (Indicators of Compromise) against multiple OSINT (Open Source Intelligence) providers and produces a single weighted verdict with an auditable explanation of how it was reached.
 
-Feed it an IP, domain, URL, or file hash. MODUS-Intel classifies it, fans out async lookups to VirusTotal, AbuseIPDB, and URLHaus, scores the responses, and tells you whether the indicator is benign, suspicious, or malicious, and why.
+Feed it an IP, domain, URL, or file hash. MODUS-Intel classifies it, fans out async lookups to VirusTotal, AbuseIPDB, URLHaus, and GreyNoise, scores the responses, and tells you whether the indicator is benign, suspicious, or malicious, and why.
 
 ```
 MODUS-INTEL // ENRICHMENT REPORT
@@ -32,7 +32,7 @@ EVIDENCE
 
 ## Features
 
-**Multi-provider enrichment.** Async fan-out to VirusTotal, AbuseIPDB, and URLHaus over a shared HTTP client, with per-provider trust weights. Providers self-register through a plugin registry, so adding a new one is a single subclass plus an import.
+**Multi-provider enrichment.** Async fan-out to VirusTotal, AbuseIPDB, URLHaus, and GreyNoise over a shared HTTP client, with per-provider trust weights. Providers self-register through a plugin registry, so adding a new one is a single subclass plus an import.
 
 **Weighted verdicts with overrides.** Provider scores are combined into a weighted average, but a single high-confidence detection (score 90 or above from any provider) forces a malicious verdict so it cannot be diluted by quieter sources. Run with `--explain` to get the full decision breakdown: every provider's score, weight, and status, the thresholds applied, and whether an override fired.
 
@@ -63,6 +63,7 @@ Copy `.env.example` to `.env` and add your API keys (or export them as environme
 | `VT_API_KEY` | VirusTotal | https://www.virustotal.com/gui/my-apikey |
 | `ABUSEIPDB_API_KEY` | AbuseIPDB | https://www.abuseipdb.com/account/api |
 | `URLHAUS_AUTH_KEY` | URLHaus | https://auth.abuse.ch/ |
+| `GREYNOISE_API_KEY` | GreyNoise | https://viz.greynoise.io/account/ |
 
 All keys are optional. A provider without a key is skipped, and the CLI warns you which lookups will not run. Note that the VirusTotal free tier allows 4 requests per minute; for large batches, lower `--concurrency` accordingly.
 
@@ -101,7 +102,7 @@ Useful flags for both commands:
 ## How verdicts are computed
 
 1. Each provider returns a 0-100 score. Errored lookups are excluded; they carry no signal about the indicator.
-2. Scores are combined into a weighted average using per-provider trust weights (VirusTotal 1.5, URLHaus 1.2, AbuseIPDB 1.0).
+2. Scores are combined into a weighted average using per-provider trust weights (VirusTotal 1.5, URLHaus 1.2, AbuseIPDB 1.0, GreyNoise 1.0).
 3. Any single provider at score 90 or above forces a **malicious** verdict (override).
 4. Otherwise: weighted average >= 75 is **malicious**, >= 25 is **suspicious**, below that is **benign**. Providers affirmatively reporting zero detections count as evidence of benign, not as an unknown.
 5. **unknown** is reserved for the cases where there is nothing to go on: no configured providers, no provider supporting the indicator type, or every lookup failing.
@@ -123,7 +124,8 @@ src/modus_intel/
     ├── base.py           # BaseProvider ABC with self-registration
     ├── virustotal.py
     ├── abuseipdb.py
-    └── urlhaus.py
+    ├── urlhaus.py
+    └── greynoise.py
 ```
 
 Adding a provider: subclass `BaseProvider`, set `name` and `env_var`, implement `supports()` and `lookup_async()`, and import the module in `providers/__init__.py`. The registry handles the rest.

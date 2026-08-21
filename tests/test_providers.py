@@ -5,6 +5,7 @@ import pytest
 
 from modus_intel.providers.abuseipdb import AbuseIPDBProvider
 from modus_intel.providers.base import BaseProvider
+from modus_intel.providers.greynoise import GreyNoiseProvider
 from modus_intel.providers.urlhaus import URLHausProvider
 from modus_intel.providers.virustotal import VirusTotalProvider
 
@@ -24,11 +25,12 @@ class TestRegistry:
         assert VirusTotalProvider in BaseProvider.registry
         assert AbuseIPDBProvider in BaseProvider.registry
         assert URLHausProvider in BaseProvider.registry
+        assert GreyNoiseProvider in BaseProvider.registry
 
     def test_registry_drives_instantiation(self):
         providers = [cls() for cls in BaseProvider.registry]
         names = {p.name for p in providers}
-        assert {"virustotal", "abuseipdb", "urlhaus"} <= names
+        assert {"virustotal", "abuseipdb", "urlhaus", "greynoise"} <= names
 
 
 class TestVirusTotal:
@@ -203,6 +205,102 @@ class TestURLHaus:
 
         async with mock_client(handler) as client:
             result = await self.make().lookup_async("http://bad", "url", client)
+
+        assert result is not None
+        assert result.status == "error"
+
+
+class TestGreyNoise:
+    def make(self) -> GreyNoiseProvider:
+        p = GreyNoiseProvider()
+        p.api_key = "test-key"
+        return p
+
+    def test_supports_only_ip(self):
+        p = GreyNoiseProvider()
+        assert p.supports("ip")
+        assert not p.supports("domain")
+        assert not p.supports("url")
+
+    @pytest.mark.asyncio
+    async def test_missing_key_skips(self):
+        p = GreyNoiseProvider()
+        p.api_key = None
+        async with mock_client(lambda r: httpx.Response(500)) as client:
+            assert await p.lookup_async("8.8.8.8", "ip", client) is None
+
+    @pytest.mark.asyncio
+    async def test_malicious_classification(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = {
+                "noise": True,
+                "riot": False,
+                "classification": "malicious",
+                "name": "unknown",
+                "link": "https://viz.greynoise.io/ip/45.155.205.233",
+                "last_seen": "2026-08-20",
+                "message": "Success",
+            }
+            return httpx.Response(200, content=json.dumps(body))
+
+        async with mock_client(handler) as client:
+            result = await self.make().lookup_async("45.155.205.233", "ip", client)
+
+        assert result is not None
+        assert result.status == "ok"
+        assert result.score == 75
+        assert result.confidence == "high"
+        assert "malicious" in result.labels
+        assert "internet_scanner" in result.labels
+
+    @pytest.mark.asyncio
+    async def test_riot_zeroes_noise_score(self):
+        # A known-benign business service (RIOT) must not score as a
+        # scanner even when noise is also set.
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = {
+                "noise": True,
+                "riot": True,
+                "classification": "benign",
+                "name": "Google Public DNS",
+                "message": "Success",
+            }
+            return httpx.Response(200, content=json.dumps(body))
+
+        async with mock_client(handler) as client:
+            result = await self.make().lookup_async("8.8.8.8", "ip", client)
+
+        assert result is not None
+        assert result.status == "ok"
+        assert result.score == 0
+        assert "riot" in result.labels
+
+    @pytest.mark.asyncio
+    async def test_plain_scanner_scores_35(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = {"noise": True, "riot": False, "message": "Success"}
+            return httpx.Response(200, content=json.dumps(body))
+
+        async with mock_client(handler) as client:
+            result = await self.make().lookup_async("1.2.3.4", "ip", client)
+
+        assert result is not None
+        assert result.score == 35
+        assert result.confidence == "medium"
+
+    @pytest.mark.asyncio
+    async def test_404_is_no_data(self):
+        async with mock_client(lambda r: httpx.Response(404)) as client:
+            result = await self.make().lookup_async("10.0.0.1", "ip", client)
+
+        assert result is not None
+        assert result.status == "no_data"
+        assert result.score == 0
+
+    @pytest.mark.asyncio
+    async def test_429_is_error(self):
+        async with mock_client(lambda r: httpx.Response(429)) as client:
+            result = await self.make().lookup_async("1.2.3.4", "ip", client)
 
         assert result is not None
         assert result.status == "error"

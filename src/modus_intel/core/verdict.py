@@ -9,6 +9,7 @@ PROVIDER_WEIGHTS = {
     "virustotal": 1.5,
     "abuseipdb": 1.0,
     "urlhaus": 1.2,
+    "greynoise": 1.0,
 }
 
 # Any single provider reporting at or above this score forces a malicious
